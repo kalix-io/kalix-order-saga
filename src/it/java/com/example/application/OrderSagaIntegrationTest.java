@@ -2,13 +2,17 @@ package com.example.application;
 
 import com.example.domain.InventoryCommand.AddProduct;
 import com.example.domain.Order;
+import com.google.protobuf.any.Any;
+import kalix.javasdk.DeferredCall;
+import kalix.javasdk.client.ComponentClient;
 import kalix.spring.testkit.KalixIntegrationTestKitSupport;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.web.reactive.function.client.WebClient;
 
 import java.time.Duration;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static com.example.domain.Inventory.INVENTORY_ID;
 import static com.example.domain.OrderStatus.CONFIRMED;
@@ -21,7 +25,7 @@ import static org.testcontainers.shaded.org.awaitility.Awaitility.await;
 public abstract class OrderSagaIntegrationTest extends KalixIntegrationTestKitSupport {
 
   @Autowired
-  private WebClient webClient;
+  private ComponentClient componentClient;
 
   private Duration timeout = Duration.of(10, SECONDS);
 
@@ -89,45 +93,33 @@ public abstract class OrderSagaIntegrationTest extends KalixIntegrationTestKitSu
   }
 
   public void addProductToInventory(AddProduct addProduct) {
-    Response.Success response = webClient
-        .patch()
-        .uri("/inventory/" + INVENTORY_ID + "/add")
-        .bodyValue(addProduct)
-        .retrieve()
-        .bodyToMono(Response.Success.class)
-        .block(timeout);
-
-    assertThat(response.message()).isEqualTo("product added");
+    execute(componentClient.forEventSourcedEntity(INVENTORY_ID)
+        .call(InventoryEntity::add)
+        .params(addProduct));
   }
 
   public Integer getProductAvailableQuantity(String productId) {
-    return webClient
-        .get()
-        .uri("/inventory/" + INVENTORY_ID + "/product/" + productId)
-        .retrieve()
-        .bodyToMono(Integer.class)
-        .block(timeout);
+    return execute(componentClient.forEventSourcedEntity(INVENTORY_ID)
+        .call(InventoryEntity::getQuantity)
+        .params(productId));
   }
 
   public Order getOrder(String orderId) {
-    Order order = webClient
-        .get()
-        .uri("/order/" + orderId)
-        .retrieve()
-        .bodyToMono(Order.class)
-        .block(timeout);
-    return order;
+    return execute(componentClient.forWorkflow(orderId)
+        .call(OrderWorkflow::get));
   }
 
   public void placeOrder(String orderId, PlaceOrder placeOrder) {
-    Response.Success response = webClient
-        .post()
-        .uri("/order/" + orderId)
-        .bodyValue(placeOrder)
-        .retrieve()
-        .bodyToMono(Response.Success.class)
-        .block(timeout);
+    execute(componentClient.forWorkflow(orderId)
+        .call(OrderWorkflow::placeOrder)
+        .params(placeOrder));
+  }
 
-    assertThat(response.message()).isEqualTo("order placed");
+  private <T> T execute(DeferredCall<Any, T> deferredCall) {
+    try {
+      return deferredCall.execute().toCompletableFuture().get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+    } catch (InterruptedException | ExecutionException | TimeoutException e) {
+      throw new RuntimeException(e);
+    }
   }
 }
